@@ -1,0 +1,5 @@
+type Index = integer
+function compute(value: integer): integer {
+    var result: integer;
+    result = value + 1;
+}

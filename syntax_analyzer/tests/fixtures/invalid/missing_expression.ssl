@@ -1,0 +1,4 @@
+function broken(value: integer): integer {
+    var result: integer;
+    result = ;
+}

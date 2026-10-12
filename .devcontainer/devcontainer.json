@@ -1,0 +1,17 @@
+{
+  "name": "ssl-lalr-c",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "."
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cpptools",
+        "ms-vscode.makefile-tools"
+      ]
+    }
+  },
+  "postCreateCommand": "make test",
+  "remoteUser": "vscode"
+}

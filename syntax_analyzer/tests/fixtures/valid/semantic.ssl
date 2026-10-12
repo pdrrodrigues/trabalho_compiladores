@@ -1,0 +1,7 @@
+type Vector = array [4] of integer
+type Record = struct { value: integer; label: string }
+function grow(x: Vector, text: string): integer {
+    var y: integer;
+    y = x[0] + 1;
+    if (y > 0 && text[0] == 'a') y = grow(x, text);
+}
