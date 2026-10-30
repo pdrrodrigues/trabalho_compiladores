@@ -1,4 +1,5 @@
 #include "ssl/parser.h"
+#include "ssl/codegen.h"
 #include "ssl/semantic.h"
 
 #include <stdio.h>
@@ -60,8 +61,16 @@ int main(int argc, char **argv) {
       (syntax_only ? ssl_parser_parse(&lexer, dump_tokens, stdout, &diagnostic)
                    : ssl_parser_parse_tree(&lexer, dump_tokens, stdout, &tree,
                                            &diagnostic));
-  if (valid && !syntax_only)
+  SslSemanticContext *semantic = NULL;
+  if (valid && !syntax_only && !dump_tokens) {
+    semantic = ssl_semantic_analyze(tree, &names, &constants, path, &diagnostic);
+    valid = semantic != NULL;
+    if (valid)
+      valid = ssl_codegen_emit(stdout, tree, semantic, &constants, path, &diagnostic);
+  } else if (valid && !syntax_only) {
     valid = ssl_semantic_check(tree, &names, &constants, path, &diagnostic);
+  }
+  ssl_semantic_context_destroy(semantic);
   ssl_node_destroy(tree);
   if (!valid) {
     fprintf(stderr, "%s:%zu:%zu: %s\n", diagnostic.source, diagnostic.line,

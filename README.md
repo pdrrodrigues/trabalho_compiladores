@@ -70,7 +70,7 @@ build/sslcheck arquivo.ssl
 ```
 
 Por padrão, o programa executa a análise léxica, sintática, de escopo e de
-tipos.
+tipos e imprime o assembly textual da máquina virtual em `stdout`.
 
 Opções disponíveis:
 
@@ -96,8 +96,9 @@ function compute(value: integer): integer {
 }
 ```
 
-Quando o programa é válido, a execução termina sem imprimir mensagem de
-erro. Os diagnósticos são enviados para `stderr`.
+`--syntax-only` interrompe o processamento após a sintaxe e `--tokens` mostra
+somente tokens, sem gerar assembly. Diagnósticos são enviados para `stderr`;
+erros semânticos ou de geração não deixam assembly parcial em `stdout`.
 
 ## Organização do projeto
 
@@ -106,9 +107,13 @@ erro. Os diagnósticos são enviados para `stderr`.
   tipos, programa `sslcheck` e testes.
 - `syntax_analyzer/src/semantic.c`: implementação das análises de escopo e de
   tipos.
+- `code_generator/`: emissor de assembly da VM e sua documentação.
 - `build/`: arquivos gerados pela compilação.
 
 O parser constrói uma árvore sintática. Em seguida, o analisador de escopo
 resolve as declarações e usos dos identificadores. Por fim, o analisador de
 tipos verifica atribuições, operadores, chamadas de função, campos de structs
 e índices de arrays.
+
+O gerador e suas limitações estão documentados em
+[code_generator/README.md](code_generator/README.md).

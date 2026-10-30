@@ -23,6 +23,7 @@ struct Type {
   Type *element;
   Symbol *fields;
   int64_t length;
+  int64_t size;
 };
 struct Symbol {
   int32_t name;
@@ -33,13 +34,17 @@ struct Symbol {
   Symbol *member_next;
   Symbol *scope_next;
   Symbol *owned_next;
+  int64_t offset;
+  int64_t index;
+  int64_t parameters;
+  int64_t locals;
 };
 struct Scope {
   Scope *parent;
   Scope *owned_next;
   Symbol *symbols;
 };
-typedef struct {
+struct SslSemanticContext {
   const SslNameTable *names;
   const SslConstantPool *constants;
   const char *source;
@@ -47,7 +52,8 @@ typedef struct {
   Symbol *symbols;
   Scope *scopes;
   Type primitives[5];
-} Analysis;
+};
+typedef struct SslSemanticContext Analysis;
 
 static SslNode *child(SslNode *node, size_t index) {
   return node->children[index];
@@ -364,7 +370,7 @@ static Type *type_lvalue(Analysis *a, SslNode *node) {
     for (Symbol *field = base->fields; field != NULL;
          field = field->member_next)
       if (field->name == id->secondary)
-        return field->type;
+        return (id->binding = field), field->type;
     named_error(a, id, "unknown field");
     return NULL;
   }
@@ -552,34 +558,189 @@ static bool type_externals(Analysis *a, SslNode *node) {
   return type_external(a, child(node, node->count - 1));
 }
 
+static int64_t type_size(Type *type) {
+  if (type->size != 0)
+    return type->size;
+  if (type->kind == TY_ALIAS)
+    type->size = type_size(type->element);
+  else if (type->kind == TY_ARRAY)
+    type->size = type->length * type_size(type->element);
+  else if (type->kind == TY_STRUCT) {
+    int64_t size = 0;
+    for (Symbol *field = type->fields; field != NULL; field = field->member_next) {
+      field->offset = size;
+      size += type_size(field->type);
+    }
+    type->size = size;
+  } else
+    type->size = 1;
+  return type->size;
+}
+
+static void layout_ids(SslNode *list, int64_t *offset) {
+  if (list->production == 23)
+    layout_ids(child(list, 0), offset);
+  Symbol *symbol = binding(child(list, list->count - 1));
+  symbol->offset = *offset;
+  *offset += type_size(symbol->type);
+}
+
+static void layout_variables(SslNode *node, int64_t *offset) {
+  if (node->production == 20)
+    layout_variables(child(node, 0), offset);
+  SslNode *declaration = child(node, node->count - 1);
+  layout_ids(child(declaration, 1), offset);
+}
+
+static void layout_statement(SslNode *node, int64_t *offset);
+
+static void layout_statements(SslNode *node, int64_t *offset) {
+  if (node->production == 25)
+    layout_statements(child(node, 0), offset);
+  layout_statement(child(node, node->count - 1), offset);
+}
+
+static void layout_block(SslNode *node, int64_t *offset) {
+  layout_variables(child(node, 1), offset);
+  layout_statements(child(node, 2), offset);
+}
+
+static void layout_statement(SslNode *node, int64_t *offset) {
+  if (node->production == 31)
+    layout_block(child(node, 0), offset);
+  else if (node->production == 27 || node->production == 28) {
+    layout_statement(child(node, 4), offset);
+    if (node->production == 28)
+      layout_statement(child(node, 6), offset);
+  } else if (node->production == 29)
+    layout_statement(child(node, 4), offset);
+  else if (node->production == 30)
+    layout_statement(child(node, 1), offset);
+}
+
+static void layout_external(SslNode *node, int64_t *function_index) {
+  SslNode *declaration = child(node, 0);
+  if (declaration->production != 16)
+    return;
+  Symbol *function = binding(child(declaration, 1));
+  function->index = (*function_index)++;
+  int64_t offset = 0;
+  for (Symbol *parameter = function->members; parameter != NULL;
+       parameter = parameter->member_next) {
+    parameter->offset = offset;
+    offset += type_size(parameter->type);
+  }
+  function->parameters = offset;
+  layout_block(child(declaration, 7), &offset);
+  function->locals = offset - function->parameters;
+}
+
+static void layout_externals(SslNode *node, int64_t *function_index) {
+  if (node->production == 2)
+    layout_externals(child(node, 0), function_index);
+  layout_external(child(node, node->count - 1), function_index);
+}
+
 static void clear_bindings(SslNode *node) {
   node->binding = NULL;
   for (size_t i = 0; i < node->count; ++i)
     clear_bindings(child(node, i));
 }
 
-bool ssl_semantic_check(SslNode *tree, const SslNameTable *names,
-                        const SslConstantPool *constants, const char *source,
-                        SslDiagnostic *diagnostic) {
-  Analysis a = {.names = names,
+SslSemanticContext *ssl_semantic_analyze(SslNode *tree, const SslNameTable *names,
+                                         const SslConstantPool *constants,
+                                         const char *source,
+                                         SslDiagnostic *diagnostic) {
+  Analysis *a = calloc(1, sizeof *a);
+  if (a == NULL) {
+    ssl_diagnostic_set(diagnostic, source, 0, 0, "out of memory while creating analysis");
+    return NULL;
+  }
+  *a = (Analysis){.names = names,
                 .constants = constants,
                 .source = source,
                 .diagnostic = diagnostic};
   for (int i = TY_ERROR; i <= TY_STRING; ++i)
-    a.primitives[i].kind = (TypeKind)i;
-  Scope *global = new_scope(&a, NULL, tree);
-  bool valid = global != NULL && scope_externals(&a, global, child(tree, 0)) &&
-               type_externals(&a, child(tree, 0));
+    a->primitives[i].kind = (TypeKind)i;
+  Scope *global = new_scope(a, NULL, tree);
+  bool valid = global != NULL && scope_externals(a, global, child(tree, 0)) &&
+               type_externals(a, child(tree, 0));
+  if (valid) {
+    int64_t function_index = 0;
+    layout_externals(child(tree, 0), &function_index);
+  }
+  if (!valid) {
+    ssl_semantic_context_destroy(a);
+    return NULL;
+  }
+  return a;
+}
+
+void ssl_semantic_context_destroy(SslSemanticContext *a) {
+  if (a == NULL)
+    return;
+  while (a->symbols != NULL) {
+    Symbol *next = a->symbols->owned_next;
+    free(a->symbols);
+    a->symbols = next;
+  }
+  while (a->scopes != NULL) {
+    Scope *next = a->scopes->owned_next;
+    free(a->scopes);
+    a->scopes = next;
+  }
+  free(a);
+}
+
+int64_t ssl_semantic_node_size(const SslSemanticContext *context,
+                               const SslNode *node) {
+  (void)context;
+  Symbol *symbol = node == NULL ? NULL : (Symbol *)node->binding;
+  return symbol != NULL && symbol->type != NULL ? type_size(symbol->type) : 1;
+}
+int64_t ssl_semantic_lvalue_size(const SslSemanticContext *context,
+                                 SslNode *node) {
+  Type *type = type_lvalue((Analysis *)context, node);
+  return type == NULL ? 1 : type_size(type);
+}
+bool ssl_semantic_lvalue_is_string(const SslSemanticContext *context,
+                                   SslNode *node) {
+  Type *type = type_lvalue((Analysis *)context, node);
+  return type == primitive((Analysis *)context, TY_STRING);
+}
+int64_t ssl_semantic_node_offset(const SslSemanticContext *context,
+                                 const SslNode *node) {
+  (void)context;
+  Symbol *symbol = node == NULL ? NULL : (Symbol *)node->binding;
+  return symbol == NULL ? 0 : symbol->offset;
+}
+int64_t ssl_semantic_function_index(const SslSemanticContext *context,
+                                    const SslNode *node) {
+  (void)context;
+  Symbol *symbol = node == NULL ? NULL : (Symbol *)node->binding;
+  return symbol == NULL ? 0 : symbol->index;
+}
+int64_t ssl_semantic_function_parameters(const SslSemanticContext *context,
+                                         const SslNode *node) {
+  (void)context;
+  Symbol *symbol = node == NULL ? NULL : (Symbol *)node->binding;
+  return symbol == NULL ? 0 : symbol->parameters;
+}
+int64_t ssl_semantic_function_locals(const SslSemanticContext *context,
+                                     const SslNode *node) {
+  (void)context;
+  Symbol *symbol = node == NULL ? NULL : (Symbol *)node->binding;
+  return symbol == NULL ? 0 : symbol->locals;
+}
+
+bool ssl_semantic_check(SslNode *tree, const SslNameTable *names,
+                        const SslConstantPool *constants, const char *source,
+                        SslDiagnostic *diagnostic) {
+  SslSemanticContext *context =
+      ssl_semantic_analyze(tree, names, constants, source, diagnostic);
+  if (context == NULL)
+    return false;
   clear_bindings(tree);
-  while (a.symbols != NULL) {
-    Symbol *next = a.symbols->owned_next;
-    free(a.symbols);
-    a.symbols = next;
-  }
-  while (a.scopes != NULL) {
-    Scope *next = a.scopes->owned_next;
-    free(a.scopes);
-    a.scopes = next;
-  }
-  return valid;
+  ssl_semantic_context_destroy(context);
+  return true;
 }
